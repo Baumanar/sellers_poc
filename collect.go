@@ -21,14 +21,32 @@ type FileResult struct {
 	Err        error
 	Sellers    int
 	Types      map[string]int
-	Publishers []string // distinct PUBLISHER seller_ids
+	Publishers []string // distinct seller_ids we keep for indexing
 	follow     []string // INTERMEDIARY / BOTH domains (level 0 only)
+
+	// Level 0 only: what happened to the supplier's INTERMEDIARY / BOTH sellers.
+	FollowEntries int // INTERMEDIARY / BOTH sellers listed
+	NoDomain      int // ... with no domain: nothing to fetch
+	SelfRef       int // ... pointing to the supplier's own host
+	FollowDomains int // distinct domains among the rest
+	Skipped       int // ... skipped on purpose (Google)
+	FirstSeen     int // ... not already requested via an earlier supplier
+	Reached       int // ... whose sellers.json was reachable
+	Unreached     int // ... whose sellers.json was not reachable
+}
+
+// followCols heads the columns of followStats, in the same order.
+var followCols = [...]string{"inter/both", "no domain", "own host", "domains", "skipped", "new", "reachable", "not reach."}
+
+func (r *FileResult) followStats() [len(followCols)]int {
+	return [...]int{r.FollowEntries, r.NoDomain, r.SelfRef, r.FollowDomains, r.Skipped,
+		r.FirstSeen, r.Reached, r.Unreached}
 }
 
 var followTypes = map[string]bool{"INTERMEDIARY": true, "BOTH": true}
 
 // Collect fetches each supplier's sellers.json, then the sellers.json of every INTERMEDIARY or
-// BOTH seller it lists (one level, no recursion). It returns asi -> PUBLISHER seller_ids for
+// BOTH seller it lists (one level, no recursion). It returns asi -> seller_ids for
 // every reachable file, plus a report of every file requested.
 func Collect(ctx context.Context, f *Fetcher, suppliers []Supplier, skip map[string]bool,
 	workers int) (map[string][]string, []FileResult) {
@@ -37,7 +55,7 @@ func Collect(ctx context.Context, f *Fetcher, suppliers []Supplier, skip map[str
 
 	level0 := make([]FileResult, len(suppliers))
 	for i, s := range suppliers {
-		level0[i] = FileResult{Host: s.Host, Supplier: s.Name, Level: 0}
+		level0[i] = FileResult{Host: normalizeDomain(s.Host), Supplier: s.Name, Level: 0}
 	}
 	fetchAll(ctx, f, level0, workers, true)
 
@@ -50,15 +68,37 @@ func Collect(ctx context.Context, f *Fetcher, suppliers []Supplier, skip map[str
 	}
 	for i := range level0 {
 		r := &level0[i]
+		r.FollowDomains = len(r.follow)
 		for _, d := range r.follow {
-			if !queued[d] && !skip[d] {
+			switch {
+			case skip[d]:
+				r.Skipped++
+			case !queued[d]:
 				queued[d] = true
+				r.FirstSeen++
 				level1 = append(level1, FileResult{Host: d, Supplier: r.Supplier, Level: 1})
+			}
+		}
+	}
+	fetchAll(ctx, f, level1, workers, false)
+
+	for i := range level1 {
+		results[level1[i].Host] = &level1[i]
+	}
+	for i := range level0 {
+		r := &level0[i]
+		for _, d := range r.follow {
+			if skip[d] {
+				continue
+			}
+			if results[d].Err == nil {
+				r.Reached++
+			} else {
+				r.Unreached++
 			}
 		}
 		r.follow = nil
 	}
-	fetchAll(ctx, f, level1, workers, false)
 
 	all := append(level0, level1...)
 	data := make(map[string][]string, len(all))
@@ -105,13 +145,18 @@ func extract(r *FileResult, sellers []Seller, follow bool) {
 	for _, s := range sellers {
 		t := sellerType(s)
 		r.Types[t]++
+		if id := strings.TrimSpace(string(s.SellerID)); id != "" {
+			pubs[id] = struct{}{}
+		}
 		switch {
-		case t == "PUBLISHER":
-			if id := strings.TrimSpace(string(s.SellerID)); id != "" {
-				pubs[id] = struct{}{}
-			}
 		case follow && followTypes[t]:
-			if d := normalizeDomain(s.Domain); d != "" && d != r.Host {
+			r.FollowEntries++
+			switch d := normalizeDomain(s.Domain); {
+			case d == "":
+				r.NoDomain++
+			case d == r.Host:
+				r.SelfRef++
+			default:
 				targets[d] = struct{}{}
 			}
 		}

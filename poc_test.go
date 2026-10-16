@@ -18,7 +18,9 @@ var fake = map[string]string{
 		{"seller_id":"i","seller_type":"INTERMEDIARY","domain":"https://Inter1.com/"},
 		{"seller_id":"b","seller_type":"BOTH","domain":"both1.com"},
 		{"seller_id":"g","seller_type":"INTERMEDIARY","domain":"google.com"},
-		{"seller_id":"d","seller_type":"INTERMEDIARY","domain":"dead.com"}]}`,
+		{"seller_id":"d","seller_type":"INTERMEDIARY","domain":"dead.com"},
+		{"seller_id":"n","seller_type":"INTERMEDIARY"},
+		{"seller_id":"s","seller_type":"BOTH","domain":"smaato.com"}]}`,
 	"inmobi.com": `{"sellers":[{"seller_id":"9","seller_type":"PUBLISHER"},
 		{"seller_id":"i","seller_type":"INTERMEDIARY","domain":"inter1.com"}]}`,
 	"inter1.com": `{"sellers":[{"seller_id":"a","seller_type":"PUBLISHER"},
@@ -59,16 +61,24 @@ func TestCollectAndLookup(t *testing.T) {
 	if len(files) != 6 { // 3 suppliers + inter1, both1, dead
 		t.Fatalf("files = %d, want 6", len(files))
 	}
-	if got := strings.Join(data["smaato.com"], ","); got != "1,2" {
+	if got := strings.Join(data["smaato.com"], ","); got != "1,2,b,d,g,i,n,s" {
 		t.Fatalf("smaato publishers = %q", got)
+	}
+	sm := files[0] // smaato
+	if got := sm.followStats(); got != [...]int{6, 1, 1, 4, 1, 3, 2, 1} {
+		t.Fatalf("smaato follow stats = %v", got)
+	}
+	in := files[1] // inmobi: inter1 already requested via smaato
+	if in.FollowDomains != 1 || in.FirstSeen != 0 || in.Reached != 1 {
+		t.Fatalf("inmobi follow stats = %+v", in)
 	}
 	if _, ok := data["dead.com"]; ok {
 		t.Fatal("unreachable file must not be in data")
 	}
 
 	idx := NewPublisherIndex(data)
-	if idx.ASIs() != 4 || idx.IDs() != 5 {
-		t.Fatalf("asi=%d ids=%d, want 4 and 5", idx.ASIs(), idx.IDs())
+	if idx.ASIs() != 4 || idx.IDs() != 13 {
+		t.Fatalf("asi=%d ids=%d, want 4 and 13", idx.ASIs(), idx.IDs())
 	}
 	cases := []struct {
 		asi, sid string
@@ -76,10 +86,36 @@ func TestCollectAndLookup(t *testing.T) {
 	}{
 		{"smaato.com", "1", Publisher},
 		{"SMAATO.com", "2", Publisher},
-		{"smaato.com", "i", NotPublisher}, // intermediary, not a publisher
+		{"smaato.com", "i", Publisher}, // intermediary ids are now included too
 		{"inter1.com", "a", Publisher},
 		{"deep.com", "q", UnknownASI}, // level 2: not fetched
 		{"dead.com", "1", UnknownASI},
+	}
+	for _, c := range cases {
+		if got := idx.Lookup(c.asi, c.sid); got != c.want {
+			t.Errorf("Lookup(%s,%s) = %v, want %v", c.asi, c.sid, got, c.want)
+		}
+	}
+}
+
+func TestASIAliases(t *testing.T) {
+	idx := NewPublisherIndex(map[string][]string{
+		"realtimebidding.google.com": {"pub-1"},
+		"lijit.com":                  {"42"},
+		"sovrn.com":                  {"7"}, // has its own sellers.json: not aliased
+	})
+	if idx.ASIs() != 3 || idx.Aliases() != 1 {
+		t.Fatalf("asi=%d aliases=%d, want 3 and 1", idx.ASIs(), idx.Aliases())
+	}
+	cases := []struct {
+		asi, sid string
+		want     Status
+	}{
+		{"google.com", "pub-1", Publisher},
+		{"Google.com", "pub-1", Publisher},
+		{"google.com", "nope", NotPublisher},
+		{"sovrn.com", "7", Publisher},
+		{"sovrn.com", "42", NotPublisher},
 	}
 	for _, c := range cases {
 		if got := idx.Lookup(c.asi, c.sid); got != c.want {

@@ -25,3 +25,16 @@ func (i *PublisherIndex) CheckSChain(sc SupplyChain) []Status {
 	}
 	return out
 }
+
+// ValidSChain reports whether sc has at least one node and every node is a publisher.
+func (i *PublisherIndex) ValidSChain(sc *SupplyChain) bool {
+	if sc == nil || len(sc.Nodes) == 0 {
+		return false
+	}
+	for _, st := range i.CheckSChain(*sc) {
+		if st != Publisher {
+			return false
+		}
+	}
+	return true
+}
